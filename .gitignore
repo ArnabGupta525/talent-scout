@@ -84,4 +84,3 @@ htmlcov/
 # API Keys and Secrets
 secrets.json
 config.json
-config/firebase-credentials.json
