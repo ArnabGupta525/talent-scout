@@ -1,4 +1,4 @@
-"""Enhanced data handling with better debugging and error handling."""
+"""Enhanced data handling with environment variables for Firebase configuration."""
 
 import json
 import os
@@ -50,37 +50,65 @@ class CandidateData(BaseModel):
 class DataHandler:
     """Handles candidate data storage with Firestore and duplicate checking."""
     
-    def __init__(self, firebase_config_path: str = None, storage_file: str = "data/candidates.json"):
+    def __init__(self, storage_file: str = "data/candidates.json"):
         self.storage_file = storage_file
         self.db = None
         self.collection_name = "candidates"
         self.firebase_initialized = False
         
-        # Initialize Firebase/Firestore
-        self._initialize_firebase(firebase_config_path)
+        # Initialize Firebase/Firestore using environment variables
+        self._initialize_firebase_from_env()
         self._ensure_data_directory()
     
-    def _initialize_firebase(self, firebase_config_path: str):
-        """Initialize Firebase with enhanced debugging."""
-        print(f"🔍 Initializing Firebase...")
-        print(f"📍 Config path: {firebase_config_path}")
-        print(f"📁 Config exists: {os.path.exists(firebase_config_path) if firebase_config_path else False}")
+    def _initialize_firebase_from_env(self):
+        """Initialize Firebase using environment variables."""
+        print(f"🔍 Initializing Firebase from environment variables...")
         
-        if not firebase_config_path:
-            print("❌ No Firebase config path provided")
+        # Check for required environment variables
+        required_env_vars = [
+            'FIREBASE_TYPE',
+            'FIREBASE_PROJECT_ID',
+            'FIREBASE_PRIVATE_KEY_ID',
+            'FIREBASE_PRIVATE_KEY',
+            'FIREBASE_CLIENT_EMAIL',
+            'FIREBASE_CLIENT_ID',
+            'FIREBASE_AUTH_URI',
+            'FIREBASE_TOKEN_URI'
+        ]
+        
+        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            print(f"❌ Missing required environment variables: {missing_vars}")
+            print("❌ Firebase initialization skipped")
             return
-            
-        if not os.path.exists(firebase_config_path):
-            print(f"❌ Firebase config file not found at: {firebase_config_path}")
-            return
-            
+        
         try:
+            print("📋 All required environment variables found")
+            
+            # Create credentials dictionary from environment variables
+            firebase_config = {
+                "type": os.getenv('FIREBASE_TYPE'),
+                "project_id": os.getenv('FIREBASE_PROJECT_ID'),
+                "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID'),
+                "private_key": os.getenv('FIREBASE_PRIVATE_KEY').replace('\\n', '\n'),  # Handle escaped newlines
+                "client_email": os.getenv('FIREBASE_CLIENT_EMAIL'),
+                "client_id": os.getenv('FIREBASE_CLIENT_ID'),
+                "auth_uri": os.getenv('FIREBASE_AUTH_URI'),
+                "token_uri": os.getenv('FIREBASE_TOKEN_URI'),
+                "auth_provider_x509_cert_url": os.getenv('FIREBASE_AUTH_PROVIDER_CERT_URL', 'https://www.googleapis.com/oauth2/v1/certs'),
+                "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_CERT_URL')
+            }
+            
+            print(f"🔍 Firebase config created for project: {firebase_config['project_id']}")
+            print(f"📧 Using service account: {firebase_config['client_email']}")
+            
             # Check if Firebase app is already initialized
             print(f"🔍 Current Firebase apps: {len(firebase_admin._apps)}")
             
             if not firebase_admin._apps:
                 print("🚀 Initializing new Firebase app...")
-                cred = credentials.Certificate(firebase_config_path)
+                cred = credentials.Certificate(firebase_config)
                 firebase_admin.initialize_app(cred)
                 print("✅ Firebase app initialized")
             else:
@@ -101,6 +129,16 @@ class DataHandler:
         except Exception as e:
             print(f"❌ Firebase initialization error: {type(e).__name__}: {e}")
             print(f"📊 Error details: {str(e)}")
+            
+            # Additional debugging for common issues
+            if "private_key" in str(e).lower():
+                print("💡 Hint: Check if FIREBASE_PRIVATE_KEY has proper newline characters")
+                print("💡 Make sure the private key is wrapped in quotes in your .env file")
+            elif "project_id" in str(e).lower():
+                print("💡 Hint: Verify your FIREBASE_PROJECT_ID is correct")
+            elif "client_email" in str(e).lower():
+                print("💡 Hint: Check your FIREBASE_CLIENT_EMAIL format")
+                
             self.db = None
             self.firebase_initialized = False
 
@@ -123,7 +161,8 @@ class DataHandler:
             test_data = {
                 'test': True,
                 'timestamp': datetime.now().isoformat(),
-                'message': 'Connection test successful'
+                'message': 'Connection test successful',
+                'initialized_from': 'environment_variables'
             }
             
             print("📝 Writing test document...")
@@ -155,13 +194,11 @@ class DataHandler:
             with open(self.storage_file, 'w') as f:
                 json.dump([], f)
     
-
     def _normalize_phone(self, phone: str) -> str:
         """Normalize phone number for comparison."""
         if not phone:
             return ""
         return re.sub(r'\D', '', str(phone))[-10:]  # Last 10 digits
-
 
     def _normalize_name(self, name: str) -> str:
         """Normalize name for comparison."""
@@ -174,7 +211,6 @@ class DataHandler:
         if not str1 or not str2:
             return 0.0
         return SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
-
 
     def check_duplicate_candidate(self, candidate_data: Dict[str, Any]) -> Tuple[bool, str]:
         """Check if candidate already exists based on name, email, or phone."""
@@ -241,7 +277,6 @@ class DataHandler:
         except Exception as e:
             print(f"Error checking duplicates: {e}")
             return False, ""
-
     
     def save_candidate(self, candidate_data: Dict[str, Any], session_id: str) -> Tuple[bool, str]:
         """Enhanced save method with detailed debugging."""
@@ -353,7 +388,6 @@ class DataHandler:
             print(f"❌ {error_msg}")
             return False, error_msg
 
-
     def get_candidate_by_session(self, session_id: str) -> Optional[Dict]:
         """Get candidate data by session ID from Firestore or local storage."""
         # Try Firestore first
@@ -377,7 +411,6 @@ class DataHandler:
         print(f"❌ Candidate not found: {session_id}")
         return None
 
-
     def get_all_candidates(self, limit: int = 100) -> List[Dict]:
         """Get all candidates from Firestore with local fallback."""
         candidates = []
@@ -397,9 +430,6 @@ class DataHandler:
         candidates = self._load_candidates()
         print(f"📋 Retrieved {len(candidates)} candidates from local storage")
         return candidates[:limit]
-
-
-    
     
     def get_debug_info(self) -> Dict[str, Any]:
         """Get comprehensive debug information."""
@@ -410,6 +440,12 @@ class DataHandler:
             'storage_file': self.storage_file,
             'storage_file_exists': os.path.exists(self.storage_file),
             'firebase_apps_count': len(firebase_admin._apps),
+            'environment_variables_status': {
+                'FIREBASE_PROJECT_ID': bool(os.getenv('FIREBASE_PROJECT_ID')),
+                'FIREBASE_CLIENT_EMAIL': bool(os.getenv('FIREBASE_CLIENT_EMAIL')),
+                'FIREBASE_PRIVATE_KEY': bool(os.getenv('FIREBASE_PRIVATE_KEY')),
+                'FIREBASE_TYPE': bool(os.getenv('FIREBASE_TYPE')),
+            }
         }
         
         # Try to get Firestore info

@@ -25,7 +25,7 @@ class HiringChatbot:
         self.client = openai.OpenAI(api_key=api_key)
         self.model_name = model_name
         self.prompt_manager = PromptManager()
-        self.data_handler = DataHandler(firebase_config_path="config/firebase-credentials.json")
+        self.data_handler = DataHandler()
         self.question_generator = QuestionGenerator()
         
         # Conversation state
