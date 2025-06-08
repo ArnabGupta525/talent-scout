@@ -7,4 +7,3 @@ requests==2.31.0
 validators==0.22.0
 json5==0.9.14
 firebase-admin>=6.0.0
-pydantic[email]>=2.0.0
