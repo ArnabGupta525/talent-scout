@@ -84,3 +84,5 @@ htmlcov/
 # API Keys and Secrets
 secrets.json
 config.json
+
+.streamlit/secrets.toml
