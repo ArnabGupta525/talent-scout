@@ -50,15 +50,14 @@ class CandidateData(BaseModel):
 class DataHandler:
     """Handles candidate data storage with Firestore and duplicate checking."""
     
-    def __init__(self, storage_file: str = "data/candidates.json"):
-        self.storage_file = storage_file
+    def __init__(self):
+        
         self.db = None
         self.collection_name = "candidates"
         self.firebase_initialized = False
         
         # Initialize Firebase/Firestore using environment variables
         self._initialize_firebase_from_env()
-        self._ensure_data_directory()
     
     def _initialize_firebase_from_env(self):
         """Initialize Firebase using environment variables."""
@@ -186,13 +185,7 @@ class DataHandler:
             print(f"❌ Firestore connection test failed: {type(e).__name__}: {e}")
             raise e
     
-    def _ensure_data_directory(self):
-        """Ensure data directory exists for local backup."""
-        os.makedirs(os.path.dirname(self.storage_file), exist_ok=True)
-        
-        if not os.path.exists(self.storage_file):
-            with open(self.storage_file, 'w') as f:
-                json.dump([], f)
+    
     
     def _normalize_phone(self, phone: str) -> str:
         """Normalize phone number for comparison."""
@@ -214,78 +207,60 @@ class DataHandler:
 
     def check_duplicate_candidate(self, candidate_data: Dict[str, Any]) -> Tuple[bool, str]:
         """Check if candidate already exists based on name, email, or phone."""
+        if not self.db or not self.firebase_initialized:
+            return False, "Firestore not available for duplicate check"
+    
         try:
             new_name = self._normalize_name(candidate_data.get('full_name', ''))
             new_email = candidate_data.get('email', '').lower().strip()
             new_phone = self._normalize_phone(candidate_data.get('phone', ''))
-            
-            # Check Firestore first
-            if self.db:
-                try:
-                    candidates_ref = self.db.collection(self.collection_name)
-                    
-                    # Check email duplicates
-                    if new_email:
-                        email_query = candidates_ref.where('email', '==', new_email).limit(1)
-                        email_docs = list(email_query.stream())
-                        if email_docs:
-                            return True, f"Email {new_email} already registered"
-                    
-                    # Check phone duplicates
-                    if new_phone:
-                        # Note: Firestore queries work best with exact matches
-                        # For phone number variations, we'll check all candidates
-                        all_candidates = candidates_ref.stream()
-                        for doc in all_candidates:
-                            existing = doc.to_dict()
-                            existing_phone = self._normalize_phone(existing.get('phone', ''))
-                            if existing_phone and existing_phone == new_phone:
-                                return True, f"Phone number already registered"
-                    
-                    # Check name similarity (requires checking all candidates)
-                    if new_name:
-                        all_candidates = candidates_ref.stream()
-                        for doc in all_candidates:
-                            existing = doc.to_dict()
-                            existing_name = self._normalize_name(existing.get('full_name', ''))
-                            if existing_name and self._similarity_score(new_name, existing_name) > 0.85:
-                                return True, f"Similar name already exists: {existing.get('full_name')}"
-                
-                except Exception as e:
-                    print(f"Firestore duplicate check error: {e}")
-                    # Fall through to local check
-            
-            # Fallback to local file check
-            candidates = self._load_candidates()
-            for existing in candidates:
-                # Email check
-                if new_email and existing.get('email', '').lower().strip() == new_email:
+        
+            candidates_ref = self.db.collection(self.collection_name)
+        
+            # Check email duplicates
+            if new_email:
+                email_query = candidates_ref.where('email', '==', new_email).limit(1)
+                email_docs = list(email_query.stream())
+                if email_docs:
                     return True, f"Email {new_email} already registered"
+        
+            # Check phone and name duplicates by scanning all candidates
+            if new_phone or new_name:
+                all_candidates = candidates_ref.stream()
+                for doc in all_candidates:
+                    existing = doc.to_dict()
                 
-                # Phone check
-                existing_phone = self._normalize_phone(existing.get('phone', ''))
-                if new_phone and existing_phone == new_phone:
-                    return True, f"Phone number already registered"
+                    # Phone check
+                    if new_phone:
+                        existing_phone = self._normalize_phone(existing.get('phone', ''))
+                        if existing_phone and existing_phone == new_phone:
+                            return True, f"Phone number already registered"
                 
-                # Name similarity check
-                existing_name = self._normalize_name(existing.get('full_name', ''))
-                if new_name and self._similarity_score(new_name, existing_name) > 0.85:
-                    return True, f"Similar name already exists: {existing.get('full_name')}"
-            
+                    # Name similarity check
+                    if new_name:
+                        existing_name = self._normalize_name(existing.get('full_name', ''))
+                        if existing_name and self._similarity_score(new_name, existing_name) > 0.85:
+                            return True, f"Similar name already exists: {existing.get('full_name')}"
+        
             return False, ""
-            
+        
         except Exception as e:
             print(f"Error checking duplicates: {e}")
-            return False, ""
+            return False, f"Error checking duplicates: {e}"
     
     def save_candidate(self, candidate_data: Dict[str, Any], session_id: str) -> Tuple[bool, str]:
-        """Enhanced save method with detailed debugging."""
+        """Save candidate to Firestore only."""
         print(f"\n🚀 Starting candidate save process...")
         print(f"📋 Session ID: {session_id}")
         print(f"📊 Candidate data keys: {list(candidate_data.keys())}")
         print(f"🔥 Firestore initialized: {self.firebase_initialized}")
         print(f"🔗 Firestore client exists: {self.db is not None}")
-        
+    
+        if not self.db or not self.firebase_initialized:
+            error_msg = "Firestore not initialized - cannot save candidate"
+            print(f"❌ {error_msg}")
+            return False, error_msg
+    
         try:
             # Check for duplicates first
             print("🔍 Checking for duplicates...")
@@ -294,92 +269,43 @@ class DataHandler:
                 print(f"❌ Duplicate found: {duplicate_msg}")
                 return False, f"Duplicate candidate detected: {duplicate_msg}"
             print("✅ No duplicates found")
-            
+        
             # Validate data
             print("🔍 Validating candidate data...")
             candidate = CandidateData(**candidate_data)
             candidate.session_id = session_id
             candidate.created_at = datetime.now().isoformat()
             candidate.updated_at = datetime.now().isoformat()
-            
+        
             candidate_dict = candidate.dict()
             print("✅ Data validation successful")
-            print(f"📊 Final data structure: {json.dumps(candidate_dict, indent=2, default=str)[:500]}...")
+        
+            # Save to Firestore only
+            print(f"🔥 Attempting Firestore save to collection: {self.collection_name}")
+            print(f"📄 Document ID: {session_id}")
+        
+            #  Use session_id as document ID for easy retrieval
+            doc_ref = self.db.collection(self.collection_name).document(session_id)
+            print(f"📍 Document reference created: {doc_ref.path}")
+        
+            # Set the document
+            print("📝 Writing document to Firestore...")
+            doc_ref.set(candidate_dict)
+            print("✅ Document write completed")
+        
+            # Verify the write by reading back
+            print("🔍 Verifying write by reading document...")
+            saved_doc = doc_ref.get()
+            if saved_doc.exists:
+                print("✅ Document verified - exists in Firestore")
+                saved_data = saved_doc.to_dict()
+                print(f"📄 Saved document keys: {list(saved_data.keys())}")
             
-            # Save to Firestore
-            firestore_success = False
-            if self.db and self.firebase_initialized:
-                try:
-                    print(f"🔥 Attempting Firestore save to collection: {self.collection_name}")
-                    print(f"📄 Document ID: {session_id}")
-                    
-                    # Use session_id as document ID for easy retrieval
-                    doc_ref = self.db.collection(self.collection_name).document(session_id)
-                    print(f"📍 Document reference created: {doc_ref.path}")
-                    
-                    # Set the document
-                    print("📝 Writing document to Firestore...")
-                    doc_ref.set(candidate_dict)
-                    print("✅ Document write completed")
-                    
-                    # Verify the write by reading back
-                    print("🔍 Verifying write by reading document...")
-                    saved_doc = doc_ref.get()
-                    if saved_doc.exists:
-                        print("✅ Document verified - exists in Firestore")
-                        saved_data = saved_doc.to_dict()
-                        print(f"📄 Saved document keys: {list(saved_data.keys())}")
-                        firestore_success = True
-                    else:
-                        print("❌ Document verification failed - not found after write")
-                        
-                except Exception as e:
-                    print(f"❌ Firestore save error: {type(e).__name__}: {e}")
-                    print(f"📊 Error details: {str(e)}")
-                    if hasattr(e, 'code'):
-                        print(f"🔢 Error code: {e.code}")
-            else:
-                print("⚠️ Skipping Firestore save - not initialized")
-            
-            # Save to local file as backup
-            local_success = False
-            try:
-                print("💾 Attempting local file save...")
-                candidates = self._load_candidates()
-                print(f"📊 Existing candidates count: {len(candidates)}")
-                
-                # Remove any existing entry with same session_id
-                original_count = len(candidates)
-                candidates = [c for c in candidates if c.get('session_id') != session_id]
-                removed_count = original_count - len(candidates)
-                if removed_count > 0:
-                    print(f"🗑️ Removed {removed_count} existing entries with session_id: {session_id}")
-                
-                candidates.append(candidate_dict)
-                print(f"📊 Total candidates after addition: {len(candidates)}")
-                
-                with open(self.storage_file, 'w') as f:
-                    json.dump(candidates, f, indent=2, default=str)
-                
-                local_success = True
-                print(f"✅ Local save successful to: {self.storage_file}")
-                
-            except Exception as e:
-                print(f"❌ Local save error: {type(e).__name__}: {e}")
-            
-            # Return success if either storage method worked
-            if firestore_success or local_success:
-                storage_info = []
-                if firestore_success:
-                    storage_info.append("Firestore")
-                if local_success:
-                    storage_info.append("local backup")
-                
-                success_msg = f"Candidate saved successfully to {' and '.join(storage_info)}"
+                success_msg = "Candidate saved successfully to Firestore"
                 print(f"🎉 {success_msg}")
                 return True, success_msg
             else:
-                error_msg = "Failed to save candidate data to any storage"
+                error_msg = "Document verification failed - not found after write"
                 print(f"❌ {error_msg}")
                 return False, error_msg
             
@@ -389,47 +315,39 @@ class DataHandler:
             return False, error_msg
 
     def get_candidate_by_session(self, session_id: str) -> Optional[Dict]:
-        """Get candidate data by session ID from Firestore or local storage."""
-        # Try Firestore first
-        if self.db:
-            try:
-                doc_ref = self.db.collection(self.collection_name).document(session_id)
-                doc = doc_ref.get()
-                if doc.exists:
-                    print(f"📖 Retrieved from Firestore: {session_id}")
-                    return doc.to_dict()
-            except Exception as e:
-                print(f"Firestore get error: {e}")
-        
-        # Fallback to local storage
-        candidates = self._load_candidates()
-        for candidate in candidates:
-            if candidate.get('session_id') == session_id:
-                print(f"📖 Retrieved from local storage: {session_id}")
-                return candidate
-        
-        print(f"❌ Candidate not found: {session_id}")
-        return None
+        """Get candidate data by session ID from Firestore only."""
+        if not self.db or not self.firebase_initialized:
+            print("❌ Firestore not available")
+            return None
+    
+        try:
+            doc_ref = self.db.collection(self.collection_name).document(session_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                print(f"📖 Retrieved from Firestore: {session_id}")
+                return doc.to_dict()
+            else:
+                print(f"❌ Candidate not found: {session_id}")
+                return None
+        except Exception as e:
+            print(f"❌ Firestore get error: {e}")
+            return None
 
     def get_all_candidates(self, limit: int = 100) -> List[Dict]:
-        """Get all candidates from Firestore with local fallback."""
-        candidates = []
-        
-        # Try Firestore first
-        if self.db:
-            try:
-                candidates_ref = self.db.collection(self.collection_name).limit(limit)
-                docs = candidates_ref.stream()
-                candidates = [doc.to_dict() for doc in docs]
-                print(f"📋 Retrieved {len(candidates)} candidates from Firestore")
-                return candidates
-            except Exception as e:
-                print(f"Firestore get_all error: {e}")
-        
-        # Fallback to local storage
-        candidates = self._load_candidates()
-        print(f"📋 Retrieved {len(candidates)} candidates from local storage")
-        return candidates[:limit]
+        """Get all candidates from Firestore only."""
+        if not self.db or not self.firebase_initialized:
+            print("❌ Firestore not available")
+            return []
+    
+        try:
+            candidates_ref = self.db.collection(self.collection_name).limit(limit)
+            docs = candidates_ref.stream()
+            candidates = [doc.to_dict() for doc in docs]
+            print(f"📋 Retrieved {len(candidates)} candidates from Firestore")
+            return candidates
+        except Exception as e:
+            print(f"❌ Firestore get_all error: {e}")
+            return []
     
     def get_debug_info(self) -> Dict[str, Any]:
         """Get comprehensive debug information."""
@@ -437,9 +355,8 @@ class DataHandler:
             'firebase_initialized': self.firebase_initialized,
             'firestore_client_exists': self.db is not None,
             'collection_name': self.collection_name,
-            'storage_file': self.storage_file,
-            'storage_file_exists': os.path.exists(self.storage_file),
             'firebase_apps_count': len(firebase_admin._apps),
+            'storage_mode': 'firestore_only',
             'environment_variables_status': {
                 'FIREBASE_PROJECT_ID': bool(os.getenv('FIREBASE_PROJECT_ID')),
                 'FIREBASE_CLIENT_EMAIL': bool(os.getenv('FIREBASE_CLIENT_EMAIL')),
@@ -455,96 +372,55 @@ class DataHandler:
                 collections = list(self.db.collections())
                 debug_info['firestore_collections'] = [col.id for col in collections]
                 debug_info['firestore_accessible'] = True
+            
+                # Get candidate count
+                candidates_ref = self.db.collection(self.collection_name)
+                docs = list(candidates_ref.stream())
+                debug_info['total_candidates'] = len(docs)
             except Exception as e:
                 debug_info['firestore_error'] = str(e)
                 debug_info['firestore_accessible'] = False
-        
-        # Get local storage info
-        try:
-            candidates = self._load_candidates()
-            debug_info['local_candidates_count'] = len(candidates)
-        except Exception as e:
-            debug_info['local_storage_error'] = str(e)
-        
+    
         return debug_info
     
     def update_candidate(self, session_id: str, updates: Dict[str, Any]) -> Tuple[bool, str]:
-        """Update candidate data in Firestore."""
+        """Update candidate data in Firestore only."""
+        if not self.db or not self.firebase_initialized:
+            return False, "Firestore not available"
+    
         try:
             updates['updated_at'] = datetime.now().isoformat()
-            
-            # Update in Firestore
-            firestore_success = False
-            if self.db:
-                try:
-                    doc_ref = self.db.collection(self.collection_name).document(session_id)
-                    doc_ref.update(updates)
-                    firestore_success = True
-                    print(f"✅ Updated in Firestore: {session_id}")
-                except Exception as e:
-                    print(f"❌ Firestore update error: {e}")
-            
-            # Update in local storage
-            local_success = False
-            try:
-                candidates = self._load_candidates()
-                for i, candidate in enumerate(candidates):
-                    if candidate.get('session_id') == session_id:
-                        candidates[i].update(updates)
-                        local_success = True
-                        break
-                
-                if local_success:
-                    with open(self.storage_file, 'w') as f:
-                        json.dump(candidates, f, indent=2, default=str)
-                    print(f"💾 Updated in local storage: {session_id}")
-            except Exception as e:
-                print(f"❌ Local update error: {e}")
-            
-            if firestore_success or local_success:
-                return True, "Candidate updated successfully"
-            else:
-                return False, "Failed to update candidate"
-                
+        
+            doc_ref = self.db.collection(self.collection_name).document(session_id)
+            doc_ref.update(updates)
+            print(f"✅ Updated in Firestore: {session_id}")
+            return True, "Candidate updated successfully"
+        
         except Exception as e:
-            return False, f"Update error: {e}"
+            error_msg = f"Update error: {e}"
+            print(f"❌ {error_msg}")
+            return False, error_msg
     
     def delete_candidate(self, session_id: str) -> Tuple[bool, str]:
-        """Delete candidate from Firestore and local storage."""
+        """Delete candidate from Firestore only."""
+        if not self.db or not self.firebase_initialized:
+            return False, "Firestore not available"
+    
         try:
-            # Delete from Firestore
-            firestore_success = False
-            if self.db:
-                try:
-                    doc_ref = self.db.collection(self.collection_name).document(session_id)
-                    doc_ref.delete()
-                    firestore_success = True
-                    print(f"🗑️ Deleted from Firestore: {session_id}")
-                except Exception as e:
-                    print(f"❌ Firestore delete error: {e}")
-            
-            # Delete from local storage
-            local_success = False
-            try:
-                candidates = self._load_candidates()
-                original_count = len(candidates)
-                candidates = [c for c in candidates if c.get('session_id') != session_id]
-                
-                if len(candidates) < original_count:
-                    with open(self.storage_file, 'w') as f:
-                        json.dump(candidates, f, indent=2, default=str)
-                    local_success = True
-                    print(f"🗑️ Deleted from local storage: {session_id}")
-            except Exception as e:
-                print(f"❌ Local delete error: {e}")
-            
-            if firestore_success or local_success:
-                return True, "Candidate deleted successfully"
-            else:
+            doc_ref = self.db.collection(self.collection_name).document(session_id)
+        
+            # Check if document exists before deleting
+            if not doc_ref.get().exists:
                 return False, "Candidate not found"
-                
+        
+            doc_ref.delete()
+            print(f"🗑️ Deleted from Firestore: {session_id}")
+            return True, "Candidate deleted successfully"
+        
         except Exception as e:
-            return False, f"Delete error: {e}"
+            error_msg = f"Delete error: {e}"
+            print(f"❌ {error_msg}")
+            return False, error_msg
     
     def _load_candidates(self) -> List[Dict]:
         """Load all candidates from local storage."""
@@ -642,33 +518,31 @@ class DataHandler:
         return sanitized
     
     def get_database_stats(self) -> Dict[str, Any]:
-        """Get database statistics."""
+        """Get database statistics from Firestore only."""
         stats = {
-            'firestore_connected': self.db is not None,
-            'local_storage_path': self.storage_file,
+            'firestore_connected': self.db is not None and self.firebase_initialized,
+            'storage_mode': 'firestore_only',
             'total_candidates': 0,
             'recent_candidates': 0
         }
-        
+    
+        if not self.db or not self.firebase_initialized:
+            return stats
+    
         try:
-            # Count from Firestore if available
-            if self.db:
-                candidates_ref = self.db.collection(self.collection_name)
-                docs = list(candidates_ref.stream())
-                stats['total_candidates'] = len(docs)
-                
-                # Count recent candidates (last 7 days)
-                from datetime import datetime, timedelta
-                week_ago = (datetime.now() - timedelta(days=7)).isoformat()
-                recent_query = candidates_ref.where('created_at', '>=', week_ago)
-                recent_docs = list(recent_query.stream())
-                stats['recent_candidates'] = len(recent_docs)
-            else:
-                # Fallback to local count
-                candidates = self._load_candidates()
-                stats['total_candidates'] = len(candidates)
-                
+            candidates_ref = self.db.collection(self.collection_name)
+            docs = list(candidates_ref.stream())
+            stats['total_candidates'] = len(docs)
+        
+            # Count recent candidates (last 7 days)
+            from datetime import datetime, timedelta
+            week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+            recent_query = candidates_ref.where('created_at', '>=', week_ago)
+            recent_docs = list(recent_query.stream())
+            stats['recent_candidates'] = len(recent_docs)
+        
         except Exception as e:
             print(f"Error getting stats: {e}")
-        
+            stats['error'] = str(e)
+    
         return stats
